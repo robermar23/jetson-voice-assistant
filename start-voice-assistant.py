@@ -26,7 +26,6 @@ from scipy.signal import resample
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 vocalizer_class = os.environ.get("VOCALIZER_CLASS", "CoquiTTS")
 VOCALIZER_CLASS =  CoquiTTS if vocalizer_class == "CoquiTTS" else CoquiTTSMulti if vocalizer_class == "CoquiTTSMulti" else BarkVocalizer
-
 INPUT_DEVICE_NAME = os.environ.get("INPUT_DEVICE", default="Blue Snowball")
 OUTPUT_DEVICE_NAME = os.environ.get("OUTPUT_DEVICE", default="USB PnP Audio Device")
 OUTPUT_DEVICE_SAMPLE_RATE = int(os.environ.get("OUTPUT_DEVICE_SAMPLE_RATE", default=48000))
@@ -35,8 +34,8 @@ CONTEXT_LENGTH = int(os.environ.get("CONTEXT_LENGTH", default=340))
 # If using the Yahboom Jetson Cube case with LED lights attached, set this to true
 HAS_YAHBOOM_CASE = os.environ.get("HAS_YAHBOOM_CASE", default="false").lower() == "true"
 MAX_FRAMES = 500
-SYSTEM_MESSAGE = "You are MistralOrca, a large language model trained by Alignment Lab AI. Reply in a way as if you are in a voice conversation with a human. Make your answers short and concise."
-
+SYSTEM_MESSAGE = os.environ.get("SYSTEM_MESSAGE", "You are MistralOrca, a large language model trained by Alignment Lab AI. Reply in a way as if you are in a voice conversation with a human. Make your answers short and concise.")
+WAKE_WORD = os.environ.get("WAKE_WORD", default="alexa")
 
 # Get device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -59,9 +58,13 @@ def sound_worker(sound_queue: mp.Queue):
     output_device_index = sd.default.device
     print(f"default device {output_device_index}")
     for device in devices:
-        if OUTPUT_DEVICE_NAME in device['name']:
+        print (f"Device {device['index']}: {device['name']}, max_output_channels: {device['max_output_channels']}, default_samplerate: {device['default_samplerate']}")
+        if OUTPUT_DEVICE_NAME.lower() in device['name'].lower():
             output_device_index = device['index']
+            print (f"found output device {OUTPUT_DEVICE_NAME} at index {output_device_index} with name {device['name']}")
             break
+        else:
+            print(f"output device {OUTPUT_DEVICE_NAME} not found, using default device {output_device_index} with name {device['name']}")
 
     while True:
         try:
@@ -85,8 +88,13 @@ def cancel_wakeword_worker(pyaudio_device_index, inference_queue: mp.Queue, canc
     
     CHUNK = 2560
     FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
+    # CHANNELS = 1
+    # RATE = 44100
+    device_info = audio_device.get_device_info_by_index(pyaudio_device_index)
+    RATE = int(device_info['defaultSampleRate'])
+    CHANNELS = min(device_info['maxInputChannels'], 1)
+    
+    mic_stream = None
     while True:
         request = cancel_queue.get()
         if request == "monitor":
@@ -109,7 +117,7 @@ def cancel_wakeword_worker(pyaudio_device_index, inference_queue: mp.Queue, canc
                         # Feed to openWakeWord model
                         print("x", end="", flush=True)
                         oww_model.predict(audio)
-                        if oww_model.prediction_buffer['alexa'][-1] > 0.5:
+                        if oww_model.prediction_buffer[WAKE_WORD][-1] > 0.5:
                             print("send cancel to inference")
                             inference_queue.put("cancel")
                             break
@@ -325,13 +333,20 @@ def set_voice_led(bot):
 def wait_for_wakeword(bot, audio_device, pyaudio_device_index):
     global silence_threshold
 
+    audio_device = pyaudio.PyAudio()
+    
     print("waiting for wakeword")
     set_standby_led(bot)
 
     CHUNK = 2560
     FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
+    #CHANNELS = 2
+    #RATE = 44100
+    
+    device_info = audio_device.get_device_info_by_index(pyaudio_device_index)
+    RATE = int(device_info['defaultSampleRate'])
+    CHANNELS = min(device_info['maxInputChannels'], 1)
+    
     oww_model = Model(enable_speex_noise_suppression=True)
     mic_stream = audio_device.open(format=FORMAT, channels=CHANNELS, input_device_index=pyaudio_device_index, rate=RATE, input=True, frames_per_buffer=CHUNK)
 
@@ -339,7 +354,7 @@ def wait_for_wakeword(bot, audio_device, pyaudio_device_index):
     while True:
         audio = np.frombuffer(mic_stream.read(CHUNK), dtype=np.int16)
         prediction = oww_model.predict(audio)
-        if prediction['alexa'] < 0.8:
+        if prediction[WAKE_WORD] < 0.8:
             break
 
     try:
@@ -350,8 +365,8 @@ def wait_for_wakeword(bot, audio_device, pyaudio_device_index):
             print(".", end="", flush=True)
             prediction = oww_model.predict(audio)
 
-            if prediction['alexa'] > 0.8:
-                print(f"alexa {prediction['alexa']}")
+            if prediction['WAKE_WORD'] > 0.8:
+                print(f"wake_word: {prediction['WAKE_WORD']}")
                 return noise_sample
             else:
                 # Use frame to calibrate for ambient noise by 
@@ -383,10 +398,16 @@ def start_speech_recognizer(whisper_model, llm, bot, audio_device, pyaudio_devic
     audio_buffer = deque(maxlen=MAX_FRAMES)
 
     FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
+    # CHANNELS = 1
+    # RATE = 16000
+
+    device_info = audio_device.get_device_info_by_index(pyaudio_device_index)
+    RATE = int(device_info['defaultSampleRate'])
+    CHANNELS = min(device_info['maxInputChannels'], 1)
+    
     CHUNK = 2560
     MAX_INACTIVITY = 6.0
+    mic_stream = None
     
     inactivity_timer = time.time()
     user_has_started_conversation = False
@@ -562,19 +583,23 @@ if __name__ == '__main__':
     sound_thread = ctx.Process(target=sound_worker, args=(sound_queue,))  
     sound_thread.start()
     
-    vocalization_queue.put("Hello! I am an advanced assistant and I am ready to Help!\n")
-    vocalization_queue.put("You can call me \"Alexa\" to start a conversation.\n")
+    vocalization_queue.put("Hello! I am an AI and I am here to Help!\n")
+    vocalization_queue.put(f"You can call me {WAKE_WORD} to start a conversation.\n")
     wait_for_vocalization()
 
 
     audio_device = pyaudio.PyAudio()
     pyaudio_device_index = 0
     
-
     for i in range(audio_device.get_device_count()):
+        print (f"Device {i}: {audio_device.get_device_info_by_index(i)['name']}")
         dev = audio_device.get_device_info_by_index(i)
-        if INPUT_DEVICE_NAME in dev['name']:
+        if INPUT_DEVICE_NAME.lower() in dev['name'].lower():
+            print(f"found input device {INPUT_DEVICE_NAME} with name {dev['name']} at index {i}")
             pyaudio_device_index = i
+            break
+        else:
+            print(f"skipping input device {INPUT_DEVICE_NAME} at index {i} with name {dev['name']}")
 
 
     audio_as_np_int16, sample_rate = get_sound_as_np("chime.wav")

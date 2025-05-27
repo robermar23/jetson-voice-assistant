@@ -6,9 +6,13 @@ WORKDIR /root
 ENV PATH="/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 RUN mkdir -p /usr/local/app
 WORKDIR /usr/local/app
-RUN pip install --ignore-installed TTS
+
+COPY numpy-constraint.txt .
+
+RUN pip install --ignore-installed TTS --constraint=numpy-constraint.txt numpy
+
 RUN wget https://nvidia.box.com/shared/static/0h6tk4msrl9xz3evft9t0mpwwwkw7a32.whl -O torch-2.1.0-cp310-cp310-linux_aarch64.whl
-RUN pip install torch-2.1.0-cp310-cp310-linux_aarch64.whl --force-reinstall
+RUN pip install torch-2.1.0-cp310-cp310-linux_aarch64.whl --force-reinstall --constraint=numpy-constraint.txt
 ENV TORCHAUDIO_VERSION 'v2.1.0'
 ENV TORCH_CUDA_ARCH_LIST "5.3;6.2;7.2;8.7"
 RUN git clone --branch ${TORCHAUDIO_VERSION} --recursive --depth=1 https://github.com/pytorch/audio torchaudio && \
@@ -18,13 +22,14 @@ RUN git clone --branch ${TORCHAUDIO_VERSION} --recursive --depth=1 https://githu
     sed -i 's#  URL_HASH SHA256=c3e5e9fdd5004dcb542feda5ee4f0ff0744628baf8ed2dd5d66f8ca1197cb1a1#  URL_HASH SHA256=d8688496ea40fb61787500e863cc63c9afcbc524468cedeb478068924eb54932#g' third_party/zlib/CMakeLists.txt || echo "failed to patch torchaudio/third_party/zlib/CMakeLists.txt" && \
     BUILD_SOX=1 python3 setup.py bdist_wheel && \
     cp dist/torchaudio*.whl /opt && \
-    pip3 install --no-cache-dir --verbose /opt/torchaudio*.whl && \
+    cp /usr/local/app/numpy-constraint.txt /usr/local/app/torchaudio/numpy-constraint.txt && \
+    pip3 install --no-cache-dir --verbose /opt/torchaudio*.whl --constraint=numpy-constraint.txt && \
     cd ../ && \
     rm -rf torchaudio
 ENV LLAMA_CUBLAS=1
 ENV CUDA_ARCHITECTURES=87
 RUN apt-get install libspeexdsp-dev portaudio19-dev -y
-RUN pip install https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp310-cp310-linux_aarch64.whl
+RUN pip install https://github.com/dscripka/openWakeWord/releases/download/v0.1.1/speexdsp_ns-0.1.2-cp310-cp310-linux_aarch64.whl --constraint=numpy-constraint.txt
 ENV LLAMA_CPP_PYTHON_REPO=abetlen/llama-cpp-python
 ENV LLAMA_CPP_PYTHON_BRANCH=main
 
@@ -57,10 +62,14 @@ RUN cd llama-cpp-python && \
  
 # # install the wheel
 RUN cp llama-cpp-python/dist/llama_cpp_python*.whl /opt && \
-    pip3 install --no-cache-dir --force-reinstall --verbose /opt/llama_cpp_python*.whl
+    pip3 install --no-cache-dir --force-reinstall --verbose /opt/llama_cpp_python*.whl --constraint=numpy-constraint.txt
 
 COPY . .
 
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --constraint=numpy-constraint.txt
+
+RUN python3 init_openwakeword.py
+
 CMD ["/usr/bin/python3", "/usr/local/app/start-voice-assistant.py"]
 
+RUN python3 -c "import numpy; print('Installed NumPy:', numpy.__version__)"
